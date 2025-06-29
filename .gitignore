@@ -1,5 +1,7 @@
 /.env
 /output
 /uploads
-/venv
+/ai
 /__pycache__
+/venv
+../next

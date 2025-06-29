@@ -6,7 +6,7 @@ import pandas as pd
 import os
 import shutil
 import uuid
-from backend_core import DataManager
+from backend import DataManager
 
 app = FastAPI()
 
