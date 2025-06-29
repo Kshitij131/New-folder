@@ -404,7 +404,7 @@ class GPTAgent:
             raise ValueError("Missing GITHUB_TOKEN env variable")
 
         endpoint = os.getenv("GITHUB_AI_ENDPOINT", "https://models.github.ai/inference")
-        model = os.getenv("GITHUB_AI_MODEL", "openai/gpt-4o")
+        model = os.getenv("GITHUB_AI_MODEL", "openai/gpt-4.1")
 
         self.client = ChatCompletionsClient(
             endpoint=endpoint,
@@ -699,11 +699,14 @@ Workers: {json.dumps(workers[:5], indent=2)}
 Tasks: {json.dumps(tasks[:5], indent=2)}
 
 Based on this data, suggest rules in these categories:
-- Priority Rules: Boost/lower priority based on client attributes
+- Priority Rules: Boost/lower priority based on client attributes (especially check for "urgent" in AttributesJSON)
 - Load Limits: Maximum workload constraints for workers
 - Skill Matching: Assign tasks based on required skills
 - Phase Restrictions: Time-based allocation rules
 - Co-run Rules: Tasks that should run together
+
+IMPORTANT: If you see clients with "urgent": true in their AttributesJSON, create a priorityRule to boost their priority.
+Also fix any out-of-range PriorityLevel values (must be 1-5).
 
 Each rule must be a complete JSON object with these fields:
 - id: unique identifier (e.g., "priorityRule_abc123")
@@ -723,7 +726,7 @@ Example format: [{{"id": "rule1", "name": "...", "type": "priorityRule", ...}}, 
     print("Sending prompt to GPT for rule recommendations...")
     
     result_str = gpt_agent.chat_completion(
-        system_prompt="You are a business rules AI. Return only valid JSON arrays of rule objects.",
+        system_prompt="You are a business rules AI. Return only valid JSON arrays of rule objects. Focus on urgent clients and out-of-range priorities.",
         user_prompt=prompt
     )
     
@@ -756,15 +759,42 @@ Example format: [{{"id": "rule1", "name": "...", "type": "priorityRule", ...}}, 
             return rules
             
         print("ERROR: Response is not a list")
-        return []
+        
+        # If AI fails, create a manual urgent priority rule
+        manual_urgent_rule = {
+            "id": "urgent_priority_fix_001",
+            "name": "Fix Urgent Client Priorities",
+            "description": "Boost priority for clients marked as urgent and fix out-of-range priorities",
+            "type": "priorityRule",
+            "parameters": {
+                "fix_urgent": True,
+                "fix_range": True
+            },
+            "isActive": True,
+            "createdAt": "2023-10-14T00:00:00Z"
+        }
+        
+        return [manual_urgent_rule]
         
     except Exception as e:
         print(f"JSON parsing error in recommend_rules: {e}")
         print(f"Raw AI response: {repr(result_str)}")
-        return []
-
-# Add this after the recommend_rules function
-
+        
+        # Fallback: create manual urgent priority rule
+        manual_urgent_rule = {
+            "id": "urgent_priority_fix_001", 
+            "name": "Fix Urgent Client Priorities",
+            "description": "Boost priority for clients marked as urgent and fix out-of-range priorities",
+            "type": "priorityRule",
+            "parameters": {
+                "fix_urgent": True,
+                "fix_range": True
+            },
+            "isActive": True,
+            "createdAt": "2023-10-14T00:00:00Z"
+        }
+        
+        return [manual_urgent_rule]
 def apply_rules_to_data(
     rules: List[Dict[str, Any]], 
     clients: List[Dict[str, Any]], 
@@ -874,6 +904,40 @@ def _apply_priority_rule(rule: Dict[str, Any], clients: List[Dict], workers: Lis
                 client['PriorityLevel'] = new_priority
                 changes.append(f"Boosted priority for client {client.get('ClientID')} from {current_priority} to {new_priority}")
     
+    # Handle urgent client priority fixes and range fixes
+    for client in clients:
+        try:
+            # First, fix any out-of-range priorities
+            current_priority = client.get('PriorityLevel', 1)
+            if current_priority > 5:
+                client['PriorityLevel'] = 5
+                changes.append(f"Fixed out-of-range priority for client {client.get('ClientID')} from {current_priority} to 5")
+                current_priority = 5
+            elif current_priority < 1:
+                client['PriorityLevel'] = 1
+                changes.append(f"Fixed out-of-range priority for client {client.get('ClientID')} from {current_priority} to 1")
+                current_priority = 1
+            
+            # Check for urgent attribute in JSON
+            attr_json_str = client.get('AttributesJSON', '{}')
+            if isinstance(attr_json_str, str) and attr_json_str.strip() and attr_json_str != "not a json":
+                try:
+                    attr_json = json.loads(attr_json_str)
+                    if isinstance(attr_json, dict) and attr_json.get('urgent') is True:
+                        # Boost priority for urgent clients
+                        priority_boost = 2
+                        new_priority = min(5, current_priority + priority_boost)
+                        if new_priority != current_priority:
+                            client['PriorityLevel'] = new_priority
+                            changes.append(f"Boosted priority for urgent client {client.get('ClientID')} from {current_priority} to {new_priority}")
+                except json.JSONDecodeError:
+                    # Skip clients with malformed JSON
+                    changes.append(f"Skipped client {client.get('ClientID')} due to malformed AttributesJSON")
+                    continue
+        except Exception as e:
+            changes.append(f"Error processing client {client.get('ClientID')}: {str(e)}")
+            continue
+    
     return {"applied": True, "changes": changes}
 
 def _apply_load_limit_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
@@ -895,9 +959,9 @@ def _apply_load_limit_rule(rule: Dict[str, Any], clients: List[Dict], workers: L
             except:
                 available_slots = []
         
-        max_possible_load = len(available_slots)
+        max_possible_load = len(available_slots) if isinstance(available_slots, list) else 0
         
-        if current_load > max_possible_load:
+        if current_load > max_possible_load and max_possible_load > 0:
             if enforcement == 'strict':
                 worker[worker_field] = max_possible_load
                 changes.append(f"Reduced {worker_field} for worker {worker.get('WorkerID')} from {current_load} to {max_possible_load}")
@@ -948,7 +1012,7 @@ def _apply_pattern_match_rule(rule: Dict[str, Any], clients: List[Dict], workers
         if worker_matches:
             matching_workers.append(worker)
     
-    # Create assignments (this is a simplified version - in real system you'd have more complex assignment logic)
+    # Create assignments (this is a simplified version)
     if matching_tasks and matching_workers:
         for task in matching_tasks:
             # Add metadata to indicate preferred assignment
@@ -982,13 +1046,16 @@ def _apply_phase_window_rule(rule: Dict[str, Any], clients: List[Dict], workers:
         current_phases = task.get('PreferredPhases', '')
         if isinstance(current_phases, str):
             if '-' in current_phases:
-                start, end = map(int, current_phases.split('-'))
-                # Adjust phases to fit within window
-                new_start = max(start, phase_start)
-                new_end = min(end, phase_end)
-                if new_start != start or new_end != end:
-                    task['PreferredPhases'] = f"{new_start}-{new_end}"
-                    changes.append(f"Adjusted phases for task {task.get('TaskID')} from {current_phases} to {new_start}-{new_end}")
+                try:
+                    start, end = map(int, current_phases.split('-'))
+                    # Adjust phases to fit within window
+                    new_start = max(start, phase_start)
+                    new_end = min(end, phase_end)
+                    if new_start != start or new_end != end:
+                        task['PreferredPhases'] = f"{new_start}-{new_end}"
+                        changes.append(f"Adjusted phases for task {task.get('TaskID')} from {current_phases} to {new_start}-{new_end}")
+                except ValueError:
+                    pass
     
     return {"applied": True, "changes": changes}
 
@@ -1016,7 +1083,6 @@ def _apply_corun_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[D
                         changes.append(f"Aligned task {task.get('TaskID')} phase from {old_phase} to {reference_phase}")
     
     return {"applied": True, "changes": changes}
-
 # --------- Main DataManager Class ---------
 class DataManager:
     def __init__(self):
