@@ -89,7 +89,7 @@ async def suggest_corrections():
 async def ai_rule_recommendations():
     try:
         dm = DataManager()
-        rule_suggestions = dm.get_ai_rule_recommendations()
+        rule_suggestions = dm.get_recommended_rules()
         return {"status": "success", "rules": rule_suggestions}
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
