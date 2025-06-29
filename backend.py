@@ -12,15 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 # --------- Validation Error Class ---------
-import os
-import json
-from typing import List, Dict, Any
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
-
 class ValidationError:
     def __init__(self, error_type: str, message: str, details: Dict[str, Any] = None):
         self.error_type = error_type
@@ -412,7 +404,7 @@ class GPTAgent:
             raise ValueError("Missing GITHUB_TOKEN env variable")
 
         endpoint = os.getenv("GITHUB_AI_ENDPOINT", "https://models.github.ai/inference")
-        model = os.getenv("GITHUB_AI_MODEL", "meta/Meta-Llama-3.1-70B-Instruct")
+        model = os.getenv("GITHUB_AI_MODEL", "mistral-ai/mistral-medium-2505")
 
         self.client = ChatCompletionsClient(
             endpoint=endpoint,
@@ -441,27 +433,137 @@ class GPTAgent:
 
 # --------- Core Functionalities ---------
 
-def natural_language_search(gpt_agent: GPTAgent, data: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
-    # Prompt GPT to filter data based on plain English query
+def natural_language_search(gpt_agent: GPTAgent, data: List[Dict[str, Any]], query: str) -> Dict[str, Any]:
+    print(f"=== DEBUG natural_language_search ===")
+    print(f"Input data length: {len(data)}")
+    print(f"Query: '{query}'")
+    
+    if not data:
+        print("ERROR: No data provided to search function")
+        return {"clients": [], "workers": [], "tasks": []}
+
+    # Print first few records to see what we're working with
+    print(f"First 3 data samples:")
+    for i, item in enumerate(data[:3]):
+        print(f"  Record {i}: {item}")
+
+    # Create a more comprehensive data sample for context
+    sample_size = min(20, len(data))
+    data_sample = data[:sample_size]
+    
+    # Determine what type of data we're working with
+    data_types = []
+    if any("ClientID" in item for item in data_sample):
+        data_types.append("clients")
+    if any("WorkerID" in item for item in data_sample):
+        data_types.append("workers") 
+    if any("TaskID" in item for item in data_sample):
+        data_types.append("tasks")
+
+    print(f"Detected data types: {data_types}")
+
     prompt = f"""
-You are a data filter assistant. Given data and a user query, return matching rows only.
+You are a data search assistant. Analyze the user's query and return relevant data from the dataset.
 
-Data sample (up to 10 entries):
-{json.dumps(data[:10], indent=2)}
+Available data types: {', '.join(data_types)}
+Total records available: {len(data)}
 
-User query: "{query}"
+Sample data structure:
+{json.dumps(data_sample[:5], indent=2)}
 
-Return a JSON array with matching rows only.
+User Query: "{query}"
+
+Instructions:
+1. Understand what the user is asking for (e.g., "top 5 clients", "workers with Python skills", "high priority tasks")
+2. If they ask for "top N" or "first N", return exactly N records
+3. If they ask for filtering, filter and return matching records
+4. If they ask for sorting, sort accordingly
+5. If no specific number is mentioned, return up to 10 relevant records
+6. Return ONLY a valid JSON array of the actual data records
+7. Do not include any explanations, markdown, or code blocks
+8. If no matches found, return an empty array []
+
+Response format: [{{record1}}, {{record2}}, ...]
 """
+
+    print("Sending prompt to GPT...")
     result_str = gpt_agent.chat_completion(
-        system_prompt="You are a helpful data filter AI.",
+        system_prompt="You are a data search AI. Return only valid JSON arrays of data records.",
         user_prompt=prompt
     )
+    
+    print(f"GPT Response (first 200 chars): {repr(result_str[:200])}")
+    
+    # Enhanced JSON parsing
     try:
-        results = json.loads(result_str)
-        return results
-    except Exception:
-        return []
+        # Remove any markdown code blocks
+        result_str = result_str.strip()
+        if result_str.startswith('```'):
+            lines = result_str.split('\n')
+            result_str = '\n'.join(lines[1:-1])  # Remove first and last line
+            print("Removed markdown code blocks")
+        
+        # Try to find JSON array in the response
+        start = result_str.find('[')
+        end = result_str.rfind(']')
+        
+        print(f"JSON search: start={start}, end={end}")
+        
+        if start != -1 and end != -1 and end > start:
+            json_str = result_str[start:end+1]
+            print(f"Extracted JSON (first 100 chars): {json_str[:100]}")
+            raw_results = json.loads(json_str)
+            if isinstance(raw_results, list):
+                print(f"SUCCESS: Parsed {len(raw_results)} results")
+                
+                # Categorize results by type
+                categorized_results = {
+                    "clients": [],
+                    "workers": [], 
+                    "tasks": []
+                }
+                
+                for item in raw_results:
+                    if "ClientID" in item:
+                        categorized_results["clients"].append(item)
+                    elif "WorkerID" in item:
+                        categorized_results["workers"].append(item)
+                    elif "TaskID" in item:
+                        categorized_results["tasks"].append(item)
+                
+                print(f"Categorized results - Clients: {len(categorized_results['clients'])}, Workers: {len(categorized_results['workers'])}, Tasks: {len(categorized_results['tasks'])}")
+                return categorized_results
+        
+        # Fallback: try to parse entire response
+        print("Trying to parse entire response...")
+        raw_results = json.loads(result_str)
+        if isinstance(raw_results, list):
+            print(f"SUCCESS: Parsed {len(raw_results)} results from full response")
+            
+            # Categorize results by type
+            categorized_results = {
+                "clients": [],
+                "workers": [], 
+                "tasks": []
+            }
+            
+            for item in raw_results:
+                if "ClientID" in item:
+                    categorized_results["clients"].append(item)
+                elif "WorkerID" in item:
+                    categorized_results["workers"].append(item)
+                elif "TaskID" in item:
+                    categorized_results["tasks"].append(item)
+            
+            return categorized_results
+            
+        print("ERROR: Response is not a list")
+        return {"clients": [], "workers": [], "tasks": []}
+        
+    except Exception as e:
+        print(f"JSON parsing error: {e}")
+        print(f"Raw AI response: {repr(result_str)}")
+        return {"clients": [], "workers": [], "tasks": []}
 
 
 def natural_language_modify(gpt_agent: GPTAgent, data: List[Dict[str, Any]], command: str) -> Dict[str, Any]:
@@ -495,27 +597,90 @@ def nl_to_rule(
     workers: List[Dict[str, Any]],
     tasks: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
-    prompt = f"""
-You are a rules converter.
+    """
+    Converts a user-provided natural language rule into a structured BusinessRule object
+    using a language model agent and a sample of the dataset for context.
+    """
+    prompt = {
+        "system": "You are an expert AI rules converter that transforms natural language descriptions of allocation rules into structured JSON rule objects.",
+        "user": f'''
+Analyze the following data to understand the context and create a rule:
 
-Clients: {json.dumps(clients[:5], indent=2)}
-Workers: {json.dumps(workers[:5], indent=2)}
-Tasks: {json.dumps(tasks[:5], indent=2)}
+Clients (sample):
+{json.dumps(clients[:5], indent=2)}
 
-Convert this user request into a structured rule JSON:
+Workers (sample):
+{json.dumps(workers[:5], indent=2)}
 
-User Request: "{user_rule_request}"
-"""
+Tasks (sample):
+{json.dumps(tasks[:5], indent=2)}
+
+Convert the following natural language rule description into a structured JSON rule:
+\"\"\"{user_rule_request.strip()}\"\"\"
+
+The rule must be a valid JSON object and follow one of these preferred types:
+- coRun
+- loadLimit
+- phaseWindow
+- slotRestriction
+- patternMatch
+- priorityRule (for boosting or lowering priority based on criteria)
+
+If none of these types fits, return a patternMatch rule as fallback using logical conditions.
+
+Required fields:
+- id: string (unique identifier like "priorityRule_123abc")
+- name: string (user-friendly title)
+- description: string (brief summary)
+- type: one of the supported types
+- parameters: type-specific key-value pairs
+- isActive: boolean
+- createdAt: ISO timestamp
+
+Return only the JSON object. Do not include explanations and code blocks and thinking.Just return the JSON object strictly and no other things.
+
+'''
+    }
+
     result_str = gpt_agent.chat_completion(
-        system_prompt="Convert natural language rules to structured JSON.",
-        user_prompt=prompt
+        system_prompt=prompt["system"],
+        user_prompt=prompt["user"]
     )
+
+    print("AI response:", repr(result_str))  # <-- log full raw response
+
     try:
+        # Remove any markdown code blocks
+        result_str = result_str.strip()
+        if result_str.startswith('```'):
+            lines = result_str.split('\n')
+            # Find the first line that's not a code block marker
+            start_idx = 1
+            while start_idx < len(lines) and (lines[start_idx].startswith('```') or lines[start_idx].strip() == ''):
+                start_idx += 1
+            # Find the last line that's not a code block marker
+            end_idx = len(lines) - 1
+            while end_idx > start_idx and (lines[end_idx].startswith('```') or lines[end_idx].strip() == ''):
+                end_idx -= 1
+            result_str = '\n'.join(lines[start_idx:end_idx+1])
+            print("Removed markdown code blocks")
+
+        # Try to find JSON object in the response
+        start = result_str.find('{')
+        end = result_str.rfind('}')
+        
+        if start != -1 and end != -1 and end > start:
+            json_str = result_str[start:end+1]
+            print(f"Extracted JSON: {json_str[:100]}...")
+            rule = json.loads(json_str)
+            return rule
+        
+        # Fallback: try to parse entire response
         rule = json.loads(result_str)
         return rule
-    except Exception:
+    except Exception as e:
+        print("Failed to parse rule JSON:", e)
         return None
-
 
 def recommend_rules(
     gpt_agent: GPTAgent,
@@ -526,36 +691,87 @@ def recommend_rules(
     prompt = f"""
 You are an AI analyst specialized in scheduling and allocation business rules.
 
-Given the data below, analyze and suggest rules specifically in these categories:
+Analyze the data below and suggest 3-5 practical business rules for task allocation and scheduling.
 
-- Co-run Rules: Tasks that must execute together
-- Load Limits: Maximum workload per worker group or individual workers
-- Phase Windows: Restrict tasks to specific time phases
-- Slot Restrictions: Minimum common availability requirements for workers
-- Pattern Matching: Advanced regex-based rules to detect recurring patterns
+Available Data:
+Clients: {json.dumps(clients[:5], indent=2)}
+Workers: {json.dumps(workers[:5], indent=2)}  
+Tasks: {json.dumps(tasks[:5], indent=2)}
 
-Clients: {json.dumps(clients[:10], indent=2)}
-Workers: {json.dumps(workers[:10], indent=2)}
-Tasks: {json.dumps(tasks[:10], indent=2)}
+Based on this data, suggest rules in these categories:
+- Priority Rules: Boost/lower priority based on client attributes
+- Load Limits: Maximum workload constraints for workers
+- Skill Matching: Assign tasks based on required skills
+- Phase Restrictions: Time-based allocation rules
+- Co-run Rules: Tasks that should run together
 
-Return a JSON list of suggested rule objects, with rule type and description.
+Each rule must be a complete JSON object with these fields:
+- id: unique identifier (e.g., "priorityRule_abc123")
+- name: descriptive title
+- description: what the rule does
+- type: one of [priorityRule, loadLimit, patternMatch, phaseWindow, coRun]
+- parameters: rule-specific configuration
+- isActive: true
+- createdAt: current ISO timestamp
+
+Return ONLY a valid JSON array of rule objects. No explanations, no markdown, no code blocks.
+
+Example format: [{{"id": "rule1", "name": "...", "type": "priorityRule", ...}}, {{"id": "rule2", ...}}]
 """
+
+    print("=== DEBUG recommend_rules ===")
+    print("Sending prompt to GPT for rule recommendations...")
+    
     result_str = gpt_agent.chat_completion(
-        system_prompt="Suggest detailed scheduling rules based on data and criteria.",
+        system_prompt="You are a business rules AI. Return only valid JSON arrays of rule objects.",
         user_prompt=prompt
     )
+    
+    print(f"GPT Response (first 200 chars): {repr(result_str[:200])}")
+    
     try:
+        # Remove any markdown code blocks
+        result_str = result_str.strip()
+        if result_str.startswith('```'):
+            lines = result_str.split('\n')
+            result_str = '\n'.join(lines[1:-1])
+            print("Removed markdown code blocks")
+        
+        # Try to find JSON array in the response
+        start = result_str.find('[')
+        end = result_str.rfind(']')
+        
+        if start != -1 and end != -1 and end > start:
+            json_str = result_str[start:end+1]
+            print(f"Extracted JSON (first 100 chars): {json_str[:100]}")
+            rules = json.loads(json_str)
+            if isinstance(rules, list):
+                print(f"SUCCESS: Parsed {len(rules)} recommended rules")
+                return rules
+        
+        # Fallback: try to parse entire response
         rules = json.loads(result_str)
-        return rules
-    except Exception:
+        if isinstance(rules, list):
+            print(f"SUCCESS: Parsed {len(rules)} rules from full response")
+            return rules
+            
+        print("ERROR: Response is not a list")
         return []
-
-
+        
+    except Exception as e:
+        print(f"JSON parsing error in recommend_rules: {e}")
+        print(f"Raw AI response: {repr(result_str)}")
+        return []
 
 # --------- Main DataManager Class ---------
 class DataManager:
     def __init__(self):
-        self.gpt_agent = GPTAgent()
+        try:
+            self.gpt_agent = GPTAgent()
+        except Exception as e:
+            print(f"Warning: AI features disabled due to initialization error: {e}")
+            self.gpt_agent = None
+        
         self.validator = FAISSSearcher(mode="rows")
 
         self.clients: List[Dict[str, Any]] = []
@@ -565,21 +781,73 @@ class DataManager:
         self.priorities: Dict[str, float] = {}
 
     def load_files(self, clients_path, workers_path, tasks_path):
-        self.clients = pd.read_csv(clients_path).to_dict(orient="records")
-        self.workers = pd.read_csv(workers_path).to_dict(orient="records")
-        self.tasks = pd.read_csv(tasks_path).to_dict(orient="records")
+        # Load CSV files and clean the data
+        clients_df = pd.read_csv(clients_path)
+        workers_df = pd.read_csv(workers_path)
+        tasks_df = pd.read_csv(tasks_path)
+        
+        # Clean the data - replace NaN values with appropriate defaults
+        clients_df = clients_df.fillna("")
+        workers_df = workers_df.fillna("")
+        tasks_df = tasks_df.fillna("")
+        
+        # Convert to dictionaries
+        self.clients = clients_df.to_dict(orient="records")
+        self.workers = workers_df.to_dict(orient="records")
+        self.tasks = tasks_df.to_dict(orient="records")
+        
+        # Clean any remaining NaN or invalid values
+        self.clients = self._clean_data(self.clients)
+        self.workers = self._clean_data(self.workers)
+        self.tasks = self._clean_data(self.tasks)
+    
+    def _clean_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean data to ensure JSON serialization compatibility"""
+        import math
+        cleaned_data = []
+        
+        for row in data:
+            cleaned_row = {}
+            for key, value in row.items():
+                # Handle different types of invalid values
+                if isinstance(value, float):
+                    if math.isnan(value) or math.isinf(value):
+                        cleaned_row[key] = None
+                    else:
+                        cleaned_row[key] = value
+                elif pd.isna(value):
+                    cleaned_row[key] = None
+                else:
+                    cleaned_row[key] = value
+            cleaned_data.append(cleaned_row)
+        
+        return cleaned_data
 
     def validate_all(self) -> List[ValidationError]:
         combined = self.clients + self.workers + self.tasks
         return self.validator.validate_data(combined)
 
-    def natural_language_search(self, query: str) -> List[Dict[str, Any]]:
+    def natural_language_search(self, query: str) -> Dict[str, Any]:        
+        # Check if data is actually loaded
+        if not self.clients and not self.workers and not self.tasks:
+            print("ERROR: No data loaded! Please load CSV files first.")
+            return {"clients": [], "workers": [], "tasks": []}
+        
         combined = self.clients + self.workers + self.tasks
-        return natural_language_search(self.gpt_agent, combined, query)
+        print(f"Total combined records: {len(combined)}")
+        
+        results = natural_language_search(self.gpt_agent, combined, query)
+        print(f"Final results - Clients: {len(results['clients'])}, Workers: {len(results['workers'])}, Tasks: {len(results['tasks'])}")
+        
+        return results
 
     def natural_language_modify(self, command: str) -> Dict[str, Any]:
         combined = self.clients + self.workers + self.tasks
         return natural_language_modify(self.gpt_agent, combined, command)
+
+    def generate_rule_from_natural_language(self, user_rule_request: str) -> Optional[Dict[str, Any]]:
+        """Generate a rule from natural language without adding it to the rules list"""
+        return nl_to_rule(self.gpt_agent, user_rule_request, self.clients, self.workers, self.tasks)
 
     def add_rule_from_nl(self, user_rule_request: str) -> Optional[Dict[str, Any]]:
         rule = nl_to_rule(self.gpt_agent, user_rule_request, self.clients, self.workers, self.tasks)
@@ -609,6 +877,307 @@ class DataManager:
         else:
             self.priorities = priorities
 
+    def apply_automatic_fixes(self) -> Dict[str, Any]:
+        """Apply automatic fixes to common data issues"""
+        fixes_applied = []
+        
+        # Fix 1: Remove duplicate IDs (but be careful about skill coverage)
+        original_clients = len(self.clients)
+        original_workers = len(self.workers) 
+        original_tasks = len(self.tasks)
+        
+        # Keep track of removed IDs to handle cascading effects
+        removed_client_ids = set()
+        removed_worker_ids = set()
+        removed_task_ids = set()
+        
+        # Remove duplicate clients (safe)
+        seen_client_ids = set()
+        filtered_clients = []
+        for client in self.clients:
+            client_id = client.get("ClientID")
+            if client_id and client_id not in seen_client_ids:
+                seen_client_ids.add(client_id)
+                filtered_clients.append(client)
+            elif client_id:
+                removed_client_ids.add(client_id)
+                fixes_applied.append(f"Removed duplicate ClientID: {client_id}")
+        self.clients = filtered_clients
+        
+        # Remove duplicate tasks (safe)
+        seen_task_ids = set()
+        filtered_tasks = []
+        for task in self.tasks:
+            task_id = task.get("TaskID")
+            if task_id and task_id not in seen_task_ids:
+                seen_task_ids.add(task_id)
+                filtered_tasks.append(task)
+            elif task_id:
+                removed_task_ids.add(task_id)
+                fixes_applied.append(f"Removed duplicate TaskID: {task_id}")
+        self.tasks = filtered_tasks
+        
+        # For workers, be more careful - collect all required skills first
+        all_required_skills = set()
+        for task in self.tasks:
+            req_skills = task.get("RequiredSkills", "")
+            if isinstance(req_skills, str):
+                skills_list = [s.strip() for s in req_skills.split(",") if s.strip()]
+                all_required_skills.update(skills_list)
+        
+        # Group workers by ID and track their skills
+        worker_groups = {}
+        for worker in self.workers:
+            worker_id = worker.get("WorkerID")
+            if worker_id:
+                if worker_id not in worker_groups:
+                    worker_groups[worker_id] = []
+                worker_groups[worker_id].append(worker)
+        
+        # For each worker ID with duplicates, keep the one with the most comprehensive skills
+        filtered_workers = []
+        for worker_id, worker_list in worker_groups.items():
+            if len(worker_list) == 1:
+                filtered_workers.append(worker_list[0])
+            else:
+                # Find the worker with the most skills that cover required skills
+                best_worker = worker_list[0]
+                best_skill_coverage = 0
+                
+                for worker in worker_list:
+                    skills_raw = worker.get("Skills", "")
+                    if isinstance(skills_raw, str):
+                        worker_skills = set(s.strip() for s in skills_raw.split(",") if s.strip())
+                    else:
+                        worker_skills = set()
+                    
+                    # Count how many required skills this worker covers
+                    coverage = len(all_required_skills.intersection(worker_skills))
+                    if coverage > best_skill_coverage or (coverage == best_skill_coverage and len(worker_skills) > len(best_worker.get("Skills", "").split(","))):
+                        best_worker = worker
+                        best_skill_coverage = coverage
+                
+                filtered_workers.append(best_worker)
+                removed_worker_ids.update(w.get("WorkerID") for w in worker_list if w != best_worker)
+                fixes_applied.append(f"Removed {len(worker_list)-1} duplicate workers for WorkerID: {worker_id}, kept the one with best skill coverage")
+        
+        self.workers = filtered_workers
+        
+        # Fix 1.5: Handle cascading effects from removed entities
+        # Clean up client requested task IDs that reference removed tasks
+        for client in self.clients:
+            if "RequestedTaskIDs" in client and client["RequestedTaskIDs"]:
+                task_ids = [tid.strip() for tid in str(client["RequestedTaskIDs"]).split(",") if tid.strip()]
+                valid_task_ids = [tid for tid in task_ids if tid not in removed_task_ids]
+                if len(valid_task_ids) != len(task_ids):
+                    client["RequestedTaskIDs"] = ",".join(valid_task_ids) if valid_task_ids else ""
+                    fixes_applied.append(f"Cleaned RequestedTaskIDs for client {client.get('ClientID')}")
+        
+        # Fix 2: Clamp out-of-range values
+        for client in self.clients:
+            if "PriorityLevel" in client:
+                old_val = client["PriorityLevel"]
+                if isinstance(old_val, (int, float)):
+                    if old_val < 1:
+                        client["PriorityLevel"] = 1
+                        fixes_applied.append(f"Fixed PriorityLevel {old_val} -> 1 for client {client.get('ClientID')}")
+                    elif old_val > 5:
+                        client["PriorityLevel"] = 5
+                        fixes_applied.append(f"Fixed PriorityLevel {old_val} -> 5 for client {client.get('ClientID')}")
+        
+        for task in self.tasks:
+            if "Duration" in task:
+                old_val = task["Duration"]
+                if isinstance(old_val, (int, float)) and old_val < 1:
+                    task["Duration"] = 1
+                    fixes_applied.append(f"Fixed Duration {old_val} -> 1 for task {task.get('TaskID')}")
+            
+            # Fix negative MaxConcurrent values
+            if "MaxConcurrent" in task:
+                old_val = task["MaxConcurrent"]
+                if isinstance(old_val, (int, float)) and old_val < 0:
+                    task["MaxConcurrent"] = 1
+                    fixes_applied.append(f"Fixed MaxConcurrent {old_val} -> 1 for task {task.get('TaskID')}")
+        
+        # Fix 3: Clean empty skills and convert to proper format
+        for worker in self.workers:
+            if "Skills" in worker:
+                skills = worker["Skills"]
+                if isinstance(skills, str):
+                    # Clean up skills string - remove empty skills
+                    cleaned_skills = [s.strip() for s in skills.split(",") if s.strip()]
+                    if len(cleaned_skills) != len([s for s in skills.split(",") if s]):  # Only count non-empty original splits
+                        worker["Skills"] = ",".join(cleaned_skills)
+                        fixes_applied.append(f"Cleaned skills for worker {worker.get('WorkerID')}")
+        
+        # Fix 4: Clean up unknown skills in tasks (replace with known skills if possible)
+        # First, collect all available skills from workers
+        available_skills = set()
+        for worker in self.workers:
+            skills_raw = worker.get("Skills", "")
+            if isinstance(skills_raw, str):
+                skills_list = [s.strip() for s in skills_raw.split(",") if s.strip()]
+                available_skills.update(skills_list)
+        
+        for task in self.tasks:
+            if "RequiredSkills" in task:
+                req_skills_raw = task["RequiredSkills"]
+                if isinstance(req_skills_raw, str):
+                    req_skills = [s.strip() for s in req_skills_raw.split(",") if s.strip()]
+                    valid_skills = [s for s in req_skills if s in available_skills]
+                    
+                    if len(valid_skills) != len(req_skills) and valid_skills:  # Only fix if we have some valid skills
+                        task["RequiredSkills"] = ",".join(valid_skills)
+                        unknown_skills = set(req_skills) - set(valid_skills)
+                        fixes_applied.append(f"Removed unknown skills {unknown_skills} from task {task.get('TaskID')}")
+                    elif not valid_skills and req_skills:  # All skills are unknown
+                        # Assign the most common skill from available workers
+                        if available_skills:
+                            most_common_skill = list(available_skills)[0]  # Just pick the first one
+                            task["RequiredSkills"] = most_common_skill
+                            fixes_applied.append(f"Replaced all unknown skills with '{most_common_skill}' for task {task.get('TaskID')}")
+        
+        # Fix 5: Add missing required fields with sensible defaults
+            if "Skills" in worker:
+                skills = worker["Skills"]
+                if isinstance(skills, str):
+                    # Clean up skills string
+                    cleaned_skills = [s.strip() for s in skills.split(",") if s.strip()]
+                    if len(cleaned_skills) != len(skills.split(",")):
+                        worker["Skills"] = ",".join(cleaned_skills)
+                        fixes_applied.append(f"Cleaned skills for worker {worker.get('WorkerID')}")
+        
+        for client in self.clients:
+            if not client.get("GroupTag"):
+                client["GroupTag"] = "default"
+                fixes_applied.append(f"Added default GroupTag for client {client.get('ClientID')}")
+            if not client.get("AttributesJSON"):
+                client["AttributesJSON"] = "{}"
+                fixes_applied.append(f"Added default AttributesJSON for client {client.get('ClientID')}")
+        
+        for worker in self.workers:
+            if not worker.get("WorkerGroup"):
+                worker["WorkerGroup"] = "default"
+                fixes_applied.append(f"Added default WorkerGroup for worker {worker.get('WorkerID')}")
+            if not worker.get("QualificationLevel"):
+                worker["QualificationLevel"] = 1
+                fixes_applied.append(f"Added default QualificationLevel for worker {worker.get('WorkerID')}")
+        
+        for task in self.tasks:
+            if not task.get("Category"):
+                task["Category"] = "general"
+                fixes_applied.append(f"Added default Category for task {task.get('TaskID')}")
+            if not task.get("PreferredPhases"):
+                task["PreferredPhases"] = "1"
+                fixes_applied.append(f"Added default PreferredPhases for task {task.get('TaskID')}")
+            if not task.get("MaxConcurrent"):
+                task["MaxConcurrent"] = 1
+                fixes_applied.append(f"Added default MaxConcurrent for task {task.get('TaskID')}")
+        
+        # Fix 5.5: Attempt to fix malformed JSON and lists
+        for client in self.clients:
+            # Try to fix malformed AttributesJSON
+            if "AttributesJSON" in client:
+                attr_json = client["AttributesJSON"]
+                if isinstance(attr_json, str) and attr_json and attr_json != "{}":
+                    try:
+                        # Try to parse as JSON
+                        json.loads(attr_json)
+                    except json.JSONDecodeError:
+                        # If it fails, try common fixes
+                        try:
+                            # Fix common JSON issues like single quotes
+                            fixed_json = attr_json.replace("'", '"')
+                            json.loads(fixed_json)
+                            client["AttributesJSON"] = fixed_json
+                            fixes_applied.append(f"Fixed malformed JSON for client {client.get('ClientID')}")
+                        except:
+                            # If still failing, set to empty JSON
+                            client["AttributesJSON"] = "{}"
+                            fixes_applied.append(f"Reset malformed JSON to empty for client {client.get('ClientID')}")
+        
+        for worker in self.workers:
+            # Try to fix malformed AvailableSlots
+            if "AvailableSlots" in worker:
+                slots = worker["AvailableSlots"]
+                if isinstance(slots, str) and slots:
+                    try:
+                        # Try to parse as JSON
+                        json.loads(slots)
+                    except json.JSONDecodeError:
+                        # Try common fixes
+                        try:
+                            # Fix common list issues like removing non-numeric values
+                            fixed_slots = slots.replace("abc", "0").replace("'", '"')
+                            parsed_slots = json.loads(fixed_slots)
+                            # Ensure all values are integers
+                            cleaned_slots = [int(x) if isinstance(x, (int, float, str)) and str(x).isdigit() else 1 for x in parsed_slots]
+                            worker["AvailableSlots"] = json.dumps(cleaned_slots)
+                            fixes_applied.append(f"Fixed malformed AvailableSlots for worker {worker.get('WorkerID')}")
+                        except:
+                            # If still failing, set to default
+                            worker["AvailableSlots"] = "[1, 1, 1]"
+                            fixes_applied.append(f"Reset malformed AvailableSlots to default for worker {worker.get('WorkerID')}")
+        
+        for task in self.tasks:
+            # Try to fix malformed PreferredPhases
+            if "PreferredPhases" in task:
+                phases = task["PreferredPhases"]
+                if isinstance(phases, str) and phases and not phases.startswith("["):
+                    try:
+                        # Try to convert simple formats
+                        if phases.isdigit():
+                            task["PreferredPhases"] = f"[{phases}]"
+                            fixes_applied.append(f"Fixed PreferredPhases format for task {task.get('TaskID')}")
+                        elif "-" in phases and all(p.strip().isdigit() for p in phases.split("-")):
+                            start, end = map(int, phases.split("-"))
+                            phase_list = list(range(start, end + 1))
+                            task["PreferredPhases"] = json.dumps(phase_list)
+                            fixes_applied.append(f"Fixed PreferredPhases range format for task {task.get('TaskID')}")
+                        else:
+                            # Set to default
+                            task["PreferredPhases"] = "[1]"
+                            fixes_applied.append(f"Reset malformed PreferredPhases to default for task {task.get('TaskID')}")
+                    except:
+                        task["PreferredPhases"] = "[1]"
+                        fixes_applied.append(f"Reset malformed PreferredPhases to default for task {task.get('TaskID')}")
+        
+        # Fix 6: Ensure worker skill coverage after all fixes
+        # Verify that all required skills are still covered after removing duplicates
+        final_required_skills = set()
+        for task in self.tasks:
+            req_skills = task.get("RequiredSkills", "")
+            if isinstance(req_skills, str):
+                skills_list = [s.strip() for s in req_skills.split(",") if s.strip()]
+                final_required_skills.update(skills_list)
+        
+        final_available_skills = set()
+        for worker in self.workers:
+            skills_raw = worker.get("Skills", "")
+            if isinstance(skills_raw, str):
+                skills_list = [s.strip() for s in skills_raw.split(",") if s.strip()]
+                final_available_skills.update(skills_list)
+        
+        # If any required skills are missing, add them to the first worker
+        missing_skills = final_required_skills - final_available_skills
+        if missing_skills and self.workers:
+            first_worker = self.workers[0]
+            current_skills = first_worker.get("Skills", "")
+            if current_skills:
+                first_worker["Skills"] = current_skills + "," + ",".join(missing_skills)
+            else:
+                first_worker["Skills"] = ",".join(missing_skills)
+            fixes_applied.append(f"Added missing skills {missing_skills} to worker {first_worker.get('WorkerID')} to ensure coverage")
+        
+        return {
+            "fixes_applied": fixes_applied,
+            "summary": {
+                "clients_removed": original_clients - len(self.clients),
+                "workers_removed": original_workers - len(self.workers),
+                "tasks_removed": original_tasks - len(self.tasks),
+                "total_fixes": len(fixes_applied)
+            }
+        }
 
 # --------- Example usage ---------
 if __name__ == "__main__":

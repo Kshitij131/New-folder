@@ -1,0 +1,6 @@
+ClientID,ClientName,PriorityLevel,RequestedTaskIDs,GroupTag,AttributesJSON
+C1,Client 1,4,"T5,T18",GroupC,"{""budget"": 27825, ""urgent"": true}"
+C2,Client 2,3,"T1,T13",GroupB,"{""budget"": 48731, ""urgent"": false}"
+C3,Client 3,8,"T10,T19",GroupB,"{""budget"": 29558, ""urgent"": true}"
+C4,Client 4,2,"T99,T100",GroupA,"{""budget"": 30692, ""urgent"": false}"
+C5,Client 5,5,"T5,T19",GroupB,not a json
