@@ -1,0 +1,11 @@
+TaskID,TaskName,Category,Duration,RequiredSkills,PreferredPhases,MaxConcurrent
+T1,Task 1,CatA,3,"SkillA,SkillB","[1,2]",2
+T2,Task 2,CatA,0,"SkillA,SkillB","[1,2]",2
+T3,Task 3,CatA,3,UnknownSkill,"[1,2]",1
+T4,Task 4,CatA,1,"SkillA,SkillB","[1,2]",-1
+T5,Task 5,CatA,2,"SkillA,SkillB",not a list,2
+T6,Task 6,CatA,2,"SkillA,SkillB","[1,2]",2
+T7,Task 7,CatA,2,"SkillA,SkillB","[1,2]",1
+T8,Task 8,CatA,3,"SkillA,SkillB","[1,2]",2
+T9,Task 9,CatA,2,"SkillA,SkillB","[1,2]",2
+T10,Task 10,CatA,3,"SkillA,SkillB","[1,2]",2
