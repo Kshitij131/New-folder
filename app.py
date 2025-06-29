@@ -84,34 +84,76 @@ if st.button("Search"):
             st.info("No results found")
 
 st.markdown("---")
-st.header("5. Add New Rule (Natural Language)")
-new_rule_input = st.text_area("Describe your new rule to add:")
+st.header("5. Add Custom Rules and Apply")
 
-if st.button("Add Rule"):
-    if not new_rule_input.strip():
-        st.warning("Please describe the rule")
-    else:
-        rule = dm.add_rule_from_nl(new_rule_input)
-        if rule:
-            st.success("Rule added successfully:")
-            st.json(rule)
-        else:
-            st.error("Failed to add rule. Please check the format or try again.")
+# Tab for different rule operations
+tab1, tab2, tab3 = st.tabs(["Add Single Rule", "AI Recommendations", "Apply All Rules"])
 
-# New section for AI Recommended Rules
-st.markdown("---")
-st.header("6. AI Recommended Rules")
+with tab1:
+    st.subheader("Add and Apply Individual Rule")
+    new_rule_input = st.text_area("Describe your rule:", 
+                                  placeholder="e.g., High priority clients should be processed first")
+    
+    if st.button("Add Rule and Apply to Data", type="primary"):
+        if new_rule_input.strip():
+            with st.spinner("Creating rule and applying to data..."):
+                result = dm.add_rule_and_apply(new_rule_input.strip())
+                
+                if "error" in result:
+                    st.error(f"❌ {result['error']}")
+                else:
+                    st.success("✅ Rule created and applied!")
+                    st.info(f"📁 Modified files saved to: {result['output_directory']}")
+                    
+                    if result["changes_made"]:
+                        st.subheader("Changes Made:")
+                        for change in result["changes_made"]:
+                            st.write(f"• {change}")
+                    
+                    with st.expander("View Created Rule"):
+                        st.json(result["rule_created"])
 
-if st.button("Get AI Rule Recommendations"):
-    with st.spinner("Fetching AI recommendations..."):
-        recommended_rules = dm.get_recommended_rules()
-        if recommended_rules:
-            st.success(f"Found {len(recommended_rules)} recommended rules:")
-            for i, rule in enumerate(recommended_rules, 1):
-                st.markdown(f"**Rule {i}:**")
-                st.json(rule)
-        else:
-            st.info("No recommended rules found.")
+with tab2:
+    st.subheader("AI Rule Recommendations")
+    
+    if st.button("Get and Apply AI Recommendations"):
+        with st.spinner("Getting AI recommendations and applying..."):
+            result = dm.get_ai_recommendations_and_apply()
+            
+            if "message" in result and "No AI recommendations" in result["message"]:
+                st.info("No AI recommendations available")
+            else:
+                st.success(f"✅ Applied {result['ai_rules_applied']} AI recommendations!")
+                st.info(f"📁 Modified files saved to: {result['output_directory']}")
+                
+                with st.expander("View Applied Rules"):
+                    for rule in result["recommended_rules"]:
+                        st.json(rule)
+                
+                with st.expander("View Application Summary"):
+                    st.json(result["application_result"]["summary"])
+
+with tab3:
+    st.subheader("Apply All Existing Rules")
+    
+    if dm.rules:
+        st.write(f"You have {len(dm.rules)} rules ready to apply:")
+        for i, rule in enumerate(dm.rules):
+            st.write(f"{i+1}. **{rule.get('name', 'Unnamed')}** ({'Active' if rule.get('isActive') else 'Inactive'})")
+    
+    if st.button("Apply All Rules to Data"):
+        with st.spinner("Applying all rules to data..."):
+            result = dm.apply_rules_and_regenerate_files()
+            
+            if result["files_modified"]:
+                st.success("✅ All rules applied!")
+                st.info(f"📁 Modified files saved to: {result['output_directory']}")
+                st.write(f"Applied {result['applied_rules']} rules successfully")
+                
+                if result["rule_violations"]:
+                    st.warning(f"⚠️ {len(result['rule_violations'])} rule violations found")
+            else:
+                st.info("No rules to apply")
 
 st.markdown("---")
 st.header("7. Export Data & Rules")

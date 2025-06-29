@@ -404,7 +404,7 @@ class GPTAgent:
             raise ValueError("Missing GITHUB_TOKEN env variable")
 
         endpoint = os.getenv("GITHUB_AI_ENDPOINT", "https://models.github.ai/inference")
-        model = os.getenv("GITHUB_AI_MODEL", "mistral-ai/mistral-medium-2505")
+        model = os.getenv("GITHUB_AI_MODEL", "openai/gpt-4o")
 
         self.client = ChatCompletionsClient(
             endpoint=endpoint,
@@ -762,6 +762,260 @@ Example format: [{{"id": "rule1", "name": "...", "type": "priorityRule", ...}}, 
         print(f"JSON parsing error in recommend_rules: {e}")
         print(f"Raw AI response: {repr(result_str)}")
         return []
+
+# Add this after the recommend_rules function
+
+def apply_rules_to_data(
+    rules: List[Dict[str, Any]], 
+    clients: List[Dict[str, Any]], 
+    workers: List[Dict[str, Any]], 
+    tasks: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Apply business rules to modify data and return the updated datasets
+    """
+    print("=== APPLYING RULES TO DATA ===")
+    
+    # Create copies to avoid modifying original data
+    updated_clients = [client.copy() for client in clients]
+    updated_workers = [worker.copy() for worker in workers]
+    updated_tasks = [task.copy() for task in tasks]
+    
+    applied_rules = []
+    rule_violations = []
+    
+    for rule in rules:
+        if not rule.get('isActive', False):
+            continue
+            
+        rule_type = rule.get('type')
+        parameters = rule.get('parameters', {})
+        
+        print(f"Applying rule: {rule.get('name')} (Type: {rule_type})")
+        
+        try:
+            if rule_type == 'priorityRule':
+                result = _apply_priority_rule(rule, updated_clients, updated_workers, updated_tasks)
+            elif rule_type == 'loadLimit':
+                result = _apply_load_limit_rule(rule, updated_clients, updated_workers, updated_tasks)
+            elif rule_type == 'patternMatch':
+                result = _apply_pattern_match_rule(rule, updated_clients, updated_workers, updated_tasks)
+            elif rule_type == 'phaseWindow':
+                result = _apply_phase_window_rule(rule, updated_clients, updated_workers, updated_tasks)
+            elif rule_type == 'coRun':
+                result = _apply_corun_rule(rule, updated_clients, updated_workers, updated_tasks)
+            else:
+                result = {"applied": False, "reason": f"Unknown rule type: {rule_type}"}
+            
+            if result.get('applied', False):
+                applied_rules.append({
+                    "rule_id": rule.get('id'),
+                    "rule_name": rule.get('name'),
+                    "changes_made": result.get('changes', [])
+                })
+            else:
+                rule_violations.append({
+                    "rule_id": rule.get('id'),
+                    "rule_name": rule.get('name'),
+                    "reason": result.get('reason', 'Unknown error')
+                })
+                
+        except Exception as e:
+            rule_violations.append({
+                "rule_id": rule.get('id'),
+                "rule_name": rule.get('name'),
+                "reason": f"Error applying rule: {str(e)}"
+            })
+    
+    return {
+        "updated_clients": updated_clients,
+        "updated_workers": updated_workers,
+        "updated_tasks": updated_tasks,
+        "applied_rules": applied_rules,
+        "rule_violations": rule_violations,
+        "summary": {
+            "total_rules": len(rules),
+            "active_rules": len([r for r in rules if r.get('isActive', False)]),
+            "successfully_applied": len(applied_rules),
+            "violations": len(rule_violations)
+        }
+    }
+
+def _apply_priority_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
+    """Apply priority-based rules to boost/lower priorities"""
+    parameters = rule.get('parameters', {})
+    changes = []
+    
+    # Handle priority field boosting
+    if 'priorityField' in parameters:
+        field = parameters['priorityField']
+        order = parameters.get('order', 'ascending')
+        
+        # Sort clients by priority field
+        if field in ['PriorityLevel'] and clients:
+            clients.sort(key=lambda x: x.get(field, 0), reverse=(order == 'descending'))
+            changes.append(f"Sorted clients by {field} in {order} order")
+    
+    # Handle boost criteria
+    if 'boostCriteria' in parameters:
+        boost_criteria = parameters['boostCriteria']
+        priority_boost = parameters.get('priorityBoost', 1)
+        
+        for client in clients:
+            should_boost = True
+            for key, value in boost_criteria.items():
+                if client.get(key) != value:
+                    should_boost = False
+                    break
+            
+            if should_boost:
+                current_priority = client.get('PriorityLevel', 1)
+                new_priority = min(5, current_priority + priority_boost)  # Cap at 5
+                client['PriorityLevel'] = new_priority
+                changes.append(f"Boosted priority for client {client.get('ClientID')} from {current_priority} to {new_priority}")
+    
+    return {"applied": True, "changes": changes}
+
+def _apply_load_limit_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
+    """Apply load limit constraints to workers"""
+    parameters = rule.get('parameters', {})
+    changes = []
+    
+    worker_field = parameters.get('workerField', 'MaxLoadPerPhase')
+    limit_type = parameters.get('limitType', 'perPhase')
+    enforcement = parameters.get('enforcement', 'strict')
+    
+    for worker in workers:
+        current_load = worker.get(worker_field, 0)
+        available_slots = worker.get('AvailableSlots', [])
+        
+        if isinstance(available_slots, str):
+            try:
+                available_slots = json.loads(available_slots)
+            except:
+                available_slots = []
+        
+        max_possible_load = len(available_slots)
+        
+        if current_load > max_possible_load:
+            if enforcement == 'strict':
+                worker[worker_field] = max_possible_load
+                changes.append(f"Reduced {worker_field} for worker {worker.get('WorkerID')} from {current_load} to {max_possible_load}")
+            else:
+                changes.append(f"Warning: Worker {worker.get('WorkerID')} exceeds available slots")
+    
+    return {"applied": True, "changes": changes}
+
+def _apply_pattern_match_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
+    """Apply pattern matching rules for skill/group assignments"""
+    parameters = rule.get('parameters', {})
+    changes = []
+    
+    condition = parameters.get('condition', {})
+    assignment_rule = parameters.get('assignmentRule', 'assign')
+    
+    # Find tasks and workers that match the pattern
+    matching_tasks = []
+    matching_workers = []
+    
+    for task in tasks:
+        task_matches = True
+        for key, value in condition.items():
+            if key.startswith('task.'):
+                field = key.replace('task.', '')
+                task_value = task.get(field, '')
+                if isinstance(task_value, str) and value in task_value:
+                    continue
+                elif task_value == value:
+                    continue
+                else:
+                    task_matches = False
+                    break
+        if task_matches:
+            matching_tasks.append(task)
+    
+    for worker in workers:
+        worker_matches = True
+        for key, value in condition.items():
+            if key.startswith('worker.'):
+                field = key.replace('worker.', '')
+                worker_value = worker.get(field, '')
+                if worker_value == value:
+                    continue
+                else:
+                    worker_matches = False
+                    break
+        if worker_matches:
+            matching_workers.append(worker)
+    
+    # Create assignments (this is a simplified version - in real system you'd have more complex assignment logic)
+    if matching_tasks and matching_workers:
+        for task in matching_tasks:
+            # Add metadata to indicate preferred assignment
+            if 'PreferredWorkerGroups' not in task:
+                task['PreferredWorkerGroups'] = []
+            if isinstance(task['PreferredWorkerGroups'], str):
+                task['PreferredWorkerGroups'] = task['PreferredWorkerGroups'].split(',')
+            
+            for worker in matching_workers:
+                worker_group = worker.get('WorkerGroup', '')
+                if worker_group and worker_group not in task['PreferredWorkerGroups']:
+                    task['PreferredWorkerGroups'].append(worker_group)
+            
+            changes.append(f"Updated preferred worker groups for task {task.get('TaskID')}")
+    
+    return {"applied": True, "changes": changes}
+
+def _apply_phase_window_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
+    """Apply phase window constraints"""
+    parameters = rule.get('parameters', {})
+    changes = []
+    
+    phase_start = parameters.get('phaseStart', 1)
+    phase_end = parameters.get('phaseEnd', 5)
+    task_category = parameters.get('taskCategory')
+    
+    for task in tasks:
+        if task_category and task.get('Category') != task_category:
+            continue
+        
+        current_phases = task.get('PreferredPhases', '')
+        if isinstance(current_phases, str):
+            if '-' in current_phases:
+                start, end = map(int, current_phases.split('-'))
+                # Adjust phases to fit within window
+                new_start = max(start, phase_start)
+                new_end = min(end, phase_end)
+                if new_start != start or new_end != end:
+                    task['PreferredPhases'] = f"{new_start}-{new_end}"
+                    changes.append(f"Adjusted phases for task {task.get('TaskID')} from {current_phases} to {new_start}-{new_end}")
+    
+    return {"applied": True, "changes": changes}
+
+def _apply_corun_rule(rule: Dict[str, Any], clients: List[Dict], workers: List[Dict], tasks: List[Dict]) -> Dict[str, Any]:
+    """Apply co-run rules for tasks that should run together"""
+    parameters = rule.get('parameters', {})
+    changes = []
+    
+    task_group = parameters.get('taskGroup', [])
+    phase_alignment = parameters.get('phaseAlignment', 'same')
+    
+    if len(task_group) > 1:
+        # Find tasks in the group
+        group_tasks = [task for task in tasks if task.get('TaskID') in task_group]
+        
+        if len(group_tasks) > 1:
+            # Align phases
+            if phase_alignment == 'same':
+                # Use the first task's phase as reference
+                reference_phase = group_tasks[0].get('PreferredPhases', '1')
+                for task in group_tasks[1:]:
+                    if task.get('PreferredPhases') != reference_phase:
+                        old_phase = task.get('PreferredPhases')
+                        task['PreferredPhases'] = reference_phase
+                        changes.append(f"Aligned task {task.get('TaskID')} phase from {old_phase} to {reference_phase}")
+    
+    return {"applied": True, "changes": changes}
 
 # --------- Main DataManager Class ---------
 class DataManager:
@@ -1178,24 +1432,157 @@ class DataManager:
                 "total_fixes": len(fixes_applied)
             }
         }
+    def apply_all_rules(self) -> Dict[str, Any]:
+        """Apply all active rules to the loaded data"""
+        if not self.rules:
+            return {
+                "message": "No rules to apply",
+                "updated_clients": self.clients,
+                "updated_workers": self.workers,
+                "updated_tasks": self.tasks,
+                "applied_rules": [],
+                "rule_violations": []
+            }
+        
+        result = apply_rules_to_data(self.rules, self.clients, self.workers, self.tasks)
+        
+        # Update the actual data with rule-modified data
+        self.clients = result["updated_clients"]
+        self.workers = result["updated_workers"]
+        self.tasks = result["updated_tasks"]
+        
+        print(f"✅ Applied {len(result['applied_rules'])} rules successfully")
+        if result['rule_violations']:
+            print(f"⚠️ {len(result['rule_violations'])} rule violations found")
+        
+        return result
 
-# --------- Example usage ---------
-if __name__ == "__main__":
-    dm = DataManager()
-    dm.load_files("clients.csv", "workers.csv", "tasks.csv")
-    errors = dm.validate_all()
-    print("Validation errors found:", len(errors))
-    for e in errors:
-        print(e.to_dict())
+    def add_and_apply_rule_from_nl(self, user_rule_request: str) -> Dict[str, Any]:
+        """Add a rule from natural language and immediately apply it"""
+        rule = nl_to_rule(self.gpt_agent, user_rule_request, self.clients, self.workers, self.tasks)
+        if rule:
+            self.rules.append(rule)
+            # Apply just this rule
+            single_rule_result = apply_rules_to_data([rule], self.clients, self.workers, self.tasks)
+            
+            # Update data with changes
+            self.clients = single_rule_result["updated_clients"]
+            self.workers = single_rule_result["updated_workers"]
+            self.tasks = single_rule_result["updated_tasks"]
+            
+            return {
+                "rule_created": rule,
+                "application_result": single_rule_result
+            }
+        return {"error": "Failed to create rule from natural language"}
 
-    # Natural language example
-    nl_results = dm.natural_language_search("Find all tasks with Duration > 2")
-    print("NL Search Results:", nl_results)
+    def apply_rules_and_regenerate_files(self) -> Dict[str, Any]:
+        """Apply all active rules and regenerate the CSV files"""
+        if not self.rules:
+            return {"message": "No rules to apply", "files_modified": False}
+        
+        print("=== APPLYING RULES TO UPLOADED DATA ===")
+        
+        # Apply all active rules
+        result = apply_rules_to_data(self.rules, self.clients, self.workers, self.tasks)
+        
+        # Update the in-memory data with rule-modified data
+        self.clients = result["updated_clients"]
+        self.workers = result["updated_workers"] 
+        self.tasks = result["updated_tasks"]
+        
+        # Save the modified data back to CSV files
+        output_dir = "rule_modified_files"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate new CSV files with rule modifications
+        pd.DataFrame(self.clients).to_csv(os.path.join(output_dir, "clients_modified.csv"), index=False)
+        pd.DataFrame(self.workers).to_csv(os.path.join(output_dir, "workers_modified.csv"), index=False)
+        pd.DataFrame(self.tasks).to_csv(os.path.join(output_dir, "tasks_modified.csv"), index=False)
+        
+        # Also save the applied rules
+        with open(os.path.join(output_dir, "applied_rules.json"), "w") as f:
+            json.dump(self.rules, f, indent=2)
+        
+        return {
+            "files_modified": True,
+            "output_directory": output_dir,
+            "applied_rules": len(result["applied_rules"]),
+            "changes_summary": result["summary"],
+            "rule_violations": result["rule_violations"]
+        }
 
-    # Add a rule
-    new_rule = dm.add_rule_from_nl("Tasks with PriorityLevel 5 must be assigned first")
-    print("New rule added:", new_rule)
+    def add_rule_and_apply(self, user_rule_request: str) -> Dict[str, Any]:
+        """Add a rule from natural language and immediately apply it to data"""
+        # Create the rule
+        rule = nl_to_rule(self.gpt_agent, user_rule_request, self.clients, self.workers, self.tasks)
+        if not rule:
+            return {"error": "Failed to create rule from natural language"}
+        
+        # Add to rules list
+        rule['isActive'] = True
+        self.rules.append(rule)
+        
+        # Apply just this rule
+        result = apply_rules_to_data([rule], self.clients, self.workers, self.tasks)
+        
+        # Update data
+        self.clients = result["updated_clients"]
+        self.workers = result["updated_workers"]
+        self.tasks = result["updated_tasks"]
+        
+        # Regenerate files
+        output_dir = "rule_modified_files"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        pd.DataFrame(self.clients).to_csv(os.path.join(output_dir, "clients_modified.csv"), index=False)
+        pd.DataFrame(self.workers).to_csv(os.path.join(output_dir, "workers_modified.csv"), index=False)
+        pd.DataFrame(self.tasks).to_csv(os.path.join(output_dir, "tasks_modified.csv"), index=False)
+        
+        return {
+            "rule_created": rule,
+            "rule_applied": len(result["applied_rules"]) > 0,
+            "files_regenerated": True,
+            "output_directory": output_dir,
+            "changes_made": result["applied_rules"][0]["changes_made"] if result["applied_rules"] else []
+        }
 
-    # Export
-    output_folder = dm.export_all()
-    print(f"Data exported to {output_folder}")
+    def get_ai_recommendations_and_apply(self) -> Dict[str, Any]:
+        """Get AI recommendations and apply them to modify files"""
+        # Get AI recommendations
+        recommended_rules = recommend_rules(self.gpt_agent, self.clients, self.workers, self.tasks)
+        
+        if not recommended_rules:
+            return {"message": "No AI recommendations available"}
+        
+        # Make all recommended rules active
+        for rule in recommended_rules:
+            rule['isActive'] = True
+            self.rules.append(rule)
+        
+        # Apply all rules (including new ones)
+        result = apply_rules_to_data(self.rules, self.clients, self.workers, self.tasks)
+        
+        # Update data
+        self.clients = result["updated_clients"]
+        self.workers = result["updated_workers"]
+        self.tasks = result["updated_tasks"]
+        
+        # Regenerate files
+        output_dir = "ai_modified_files"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        pd.DataFrame(self.clients).to_csv(os.path.join(output_dir, "clients_ai_modified.csv"), index=False)
+        pd.DataFrame(self.workers).to_csv(os.path.join(output_dir, "workers_ai_modified.csv"), index=False)
+        pd.DataFrame(self.tasks).to_csv(os.path.join(output_dir, "tasks_ai_modified.csv"), index=False)
+        
+        with open(os.path.join(output_dir, "ai_applied_rules.json"), "w") as f:
+            json.dump(recommended_rules, f, indent=2)
+        
+        return {
+            "ai_rules_applied": len(recommended_rules),
+            "files_regenerated": True,
+            "output_directory": output_dir,
+            "recommended_rules": recommended_rules,
+            "application_result": result
+        }

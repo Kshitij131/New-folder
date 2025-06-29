@@ -493,3 +493,58 @@ async def export_download():
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+# Apply all rules and regenerate files
+@app.post("/apply_all_rules")
+async def apply_all_rules():
+    try:
+        dm = get_or_create_data_manager()
+        if not dm:
+            return JSONResponse(status_code=400, content={"error": "No data loaded"})
+        
+        result = dm.apply_rules_and_regenerate_files()
+        return JSONResponse({
+            "success": True,
+            "message": "Rules applied and files regenerated",
+            "result": result
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# Add rule, apply it, and regenerate files
+@app.post("/add_rule_and_apply")
+async def add_rule_and_apply(request: dict):
+    try:
+        dm = get_or_create_data_manager()
+        if not dm:
+            return JSONResponse(status_code=400, content={"error": "No data loaded"})
+        
+        rule_description = request.get("rule_description", "")
+        if not rule_description:
+            return JSONResponse(status_code=400, content={"error": "Rule description required"})
+        
+        result = dm.add_rule_and_apply(rule_description)
+        return JSONResponse({
+            "success": True,
+            "message": "Rule created, applied, and files regenerated",
+            "result": result
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# Apply AI recommendations and regenerate files
+@app.post("/apply_ai_recommendations")
+async def apply_ai_recommendations():
+    try:
+        dm = get_or_create_data_manager()
+        if not dm:
+            return JSONResponse(status_code=400, content={"error": "No data loaded"})
+        
+        result = dm.get_ai_recommendations_and_apply()
+        return JSONResponse({
+            "success": True,
+            "message": "AI recommendations applied and files regenerated",
+            "result": result
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
