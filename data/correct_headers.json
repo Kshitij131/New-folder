@@ -1,23 +1,28 @@
-[
-    "TaskID",
-    "TaskName",
-    "Duration",
-    "RequiredSkills",
-    "PreferredPhases",
-    "MaxConcurrent",
+{
+  "Client": [
+    "ClientID",
+    "ClientName",
+    "PriorityLevel",
+    "RequestedTaskIDs",
+    "GroupTag",
+    "AttributesJSON"
+  ],
+  "Worker": [
     "WorkerID",
     "WorkerName",
     "Skills",
     "AvailableSlots",
     "MaxLoadPerPhase",
     "WorkerGroup",
-    "QualificationLevel",
-    "ClientID",
-    "ClientName",
-    "PriorityLevel",
-    "RequestedTaskIDs",
-    "GroupTag",
-    "AttributesJSON",
-    "Phase",
-    "CoRunGroup"
-]
+    "QualificationLevel"
+  ],
+  "Task": [
+    "TaskID",
+    "TaskName",
+    "Category",
+    "Duration",
+    "RequiredSkills",
+    "PreferredPhases",
+    "MaxConcurrent"
+  ]
+}

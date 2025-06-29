@@ -14,6 +14,13 @@ load_dotenv()
 
 
 # --------- Validation Error Class ---------
+import os
+import json
+from typing import List, Dict, Any
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+
 class ValidationError:
     def __init__(self, error_type: str, message: str, details: Dict[str, Any] = None):
         self.error_type = error_type
@@ -27,18 +34,27 @@ class ValidationError:
             "details": self.details,
         }
 
-
-# --------- FAISSSearcher Class (Validation + Search) ---------
 class FAISSSearcher:
     def __init__(self, mode="rows"):
         self.mode = mode
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.index = None
         self.entries = []
-        self.required_columns = [
-            "ClientID", "WorkerID", "TaskID", "PriorityLevel",
-            "Duration", "AvailableSlots", "RequiredSkills",
-            "MaxConcurrent", "Phase", "AttributesJSON"
+
+        # Per-entity required columns:
+        self.required_columns_client = [
+            "ClientID", "ClientName", "PriorityLevel",
+            "RequestedTaskIDs", "GroupTag", "AttributesJSON"
+        ]
+        self.required_columns_worker = [
+            "WorkerID", "WorkerName", "Skills",
+            "AvailableSlots", "MaxLoadPerPhase",
+            "WorkerGroup", "QualificationLevel"
+        ]
+        self.required_columns_task = [
+            "TaskID", "TaskName", "Category",
+            "Duration", "RequiredSkills",
+            "PreferredPhases", "MaxConcurrent"
         ]
 
         # Load example entries for indexing
@@ -51,11 +67,34 @@ class FAISSSearcher:
             with open(file) as f:
                 data = json.load(f)
                 self.entries_obj = data
-                self.entries = [json.dumps(row) for row in data]
+                # Instead of raw JSON, create a meaningful text for embeddings
+                self.entries = [self._row_to_text(row) for row in data]
 
         self.embeddings = self.model.encode(self.entries)
         self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
-        self.index.add(np.array(self.embeddings))
+        self.index.add(np.array(self.embeddings).astype('float32'))
+
+    def _row_to_text(self, row: Dict[str, Any]) -> str:
+        # Create a textual representation of a row for embedding
+        parts = []
+        for key in sorted(row.keys()):
+            val = row[key]
+            if isinstance(val, dict):
+                val = json.dumps(val)
+            elif isinstance(val, list):
+                val = ", ".join(map(str, val))
+            parts.append(f"{key}: {val}")
+        return " | ".join(parts)
+
+    def _get_required_columns_for_row(self, row: Dict[str, Any]) -> List[str]:
+        if "ClientID" in row:
+            return self.required_columns_client
+        elif "WorkerID" in row:
+            return self.required_columns_worker
+        elif "TaskID" in row:
+            return self.required_columns_task
+        else:
+            return []
 
     def validate_data(self, data: List[Dict[str, Any]]) -> List[ValidationError]:
         errors = []
@@ -71,10 +110,12 @@ class FAISSSearcher:
         required_skills = set()
         corun_groups = {}
 
-        # Validate each row
         for row in data:
+            # Determine required columns by entity type
+            required_cols = self._get_required_columns_for_row(row)
+
             # a. Missing columns
-            missing_cols = [col for col in self.required_columns if col not in row]
+            missing_cols = [col for col in required_cols if col not in row]
             if missing_cols:
                 errors.append(ValidationError(
                     "missing_columns",
@@ -101,6 +142,8 @@ class FAISSSearcher:
                         {"id": row["WorkerID"]}
                     ))
                 worker_ids.add(row["WorkerID"])
+            
+
 
             if "TaskID" in row:
                 if row["TaskID"] in task_ids:
@@ -112,83 +155,122 @@ class FAISSSearcher:
                 task_ids.add(row["TaskID"])
 
             # c. Malformed lists
-            # AvailableSlots check
-            try:
-                slots = row.get("AvailableSlots", [])
-                if isinstance(slots, str):
-                    slots = json.loads(slots)
-                if not all(isinstance(x, int) for x in slots):
+            if "AvailableSlots" in row:
+                try:
+                    slots = row.get("AvailableSlots", [])
+                    if isinstance(slots, str):
+                        slots = json.loads(slots)
+                    if not all(isinstance(x, int) for x in slots):
+                        errors.append(ValidationError(
+                            "malformed_list",
+                            "AvailableSlots contains non-integer values",
+                            {"row": row}
+                        ))
+                except Exception:
                     errors.append(ValidationError(
                         "malformed_list",
-                        "AvailableSlots contains non-integer values",
+                        "Invalid AvailableSlots format",
                         {"row": row}
                     ))
-            except Exception:
-                errors.append(ValidationError(
-                    "malformed_list",
-                    "Invalid AvailableSlots format",
-                    {"row": row}
-                ))
 
             # d. Out-of-range values
-            if "PriorityLevel" in row and (row["PriorityLevel"] < 1 or row["PriorityLevel"] > 5):
-                errors.append(ValidationError(
-                    "out_of_range",
-                    "PriorityLevel must be between 1 and 5",
-                    {"value": row["PriorityLevel"]}
-                ))
+            if "PriorityLevel" in row:
+                if row["PriorityLevel"] < 1 or row["PriorityLevel"] > 5:
+                    errors.append(ValidationError(
+                        "out_of_range",
+                        "PriorityLevel must be between 1 and 5",
+                        {"value": row["PriorityLevel"]}
+                    ))
 
-            if "Duration" in row and row["Duration"] < 1:
-                errors.append(ValidationError(
-                    "out_of_range",
-                    "Duration must be at least 1",
-                    {"value": row["Duration"]}
-                ))
+            if "Duration" in row:
+                if row["Duration"] < 1:
+                    errors.append(ValidationError(
+                        "out_of_range",
+                        "Duration must be at least 1",
+                        {"value": row["Duration"]}
+                    ))
 
-            # e. Broken JSON in AttributesJSON
-            try:
-                attr_json = row.get("AttributesJSON", {})
-                if isinstance(attr_json, str):
-                    attr_json = json.loads(attr_json)
-                if not isinstance(attr_json, dict):
+            # e. Broken JSON in AttributesJSON (clients)
+            if "AttributesJSON" in row:
+                try:
+                    attr_json = row.get("AttributesJSON", {})
+                    if isinstance(attr_json, str):
+                        attr_json = json.loads(attr_json)
+                    if not isinstance(attr_json, dict):
+                        errors.append(ValidationError(
+                            "invalid_json",
+                            "AttributesJSON must be a valid JSON object",
+                            {"row": row}
+                        ))
+                except Exception:
                     errors.append(ValidationError(
                         "invalid_json",
-                        "AttributesJSON must be a valid JSON object",
+                        "Invalid AttributesJSON format",
                         {"row": row}
                     ))
-            except Exception:
-                errors.append(ValidationError(
-                    "invalid_json",
-                    "Invalid AttributesJSON format",
-                    {"row": row}
-                ))
 
             # f. Track phase durations for saturation checks
-            phase = row.get("Phase", None)
-            if phase is not None:
+            # Use 'PreferredPhases' if 'Phase' not present (for tasks)
+            phases = []
+            if "Phase" in row:
+                phases = [row["Phase"]]
+            elif "PreferredPhases" in row:
+                # PreferredPhases might be "1-3" or "[2,4,5]"
+                val = row["PreferredPhases"]
+                if isinstance(val, str):
+                    try:
+                        if val.startswith("["):
+                            phases = json.loads(val)
+                        elif "-" in val:
+                            start, end = map(int, val.split("-"))
+                            phases = list(range(start, end + 1))
+                        else:
+                            phases = [int(val)]
+                    except Exception:
+                        phases = []
+                elif isinstance(val, list):
+                    phases = val
+            for phase in phases:
                 phase_durations[phase] = phase_durations.get(phase, 0) + row.get("Duration", 0)
 
             # g. Track worker skills & required skills
-            if "WorkerID" in row and "Skills" in row:
-                skills_list = row["Skills"]
-                if isinstance(skills_list, str):
-                    try:
-                        skills_list = [s.strip() for s in skills_list.split(",")]
-                    except Exception:
+            # g. Track worker skills & required skills (fully safe)
+            if "WorkerID" in row:
+                skills_raw = row.get("Skills", "")
+                skills_list = []
+            
+                try:
+                    if isinstance(skills_raw, str):
+                        skills_list = [s.strip() for s in skills_raw.split(",")]
+                    elif isinstance(skills_raw, list):
+                        skills_list = [str(s).strip() for s in skills_raw]
+                    else:
                         skills_list = []
+                except Exception:
+                    skills_list = []
+            
                 worker_skills[row["WorkerID"]] = set(skills_list)
-
+            
             if "RequiredSkills" in row:
-                skills_req = row["RequiredSkills"]
-                if isinstance(skills_req, str):
-                    try:
-                        skills_req = [s.strip() for s in skills_req.split(",")]
-                    except Exception:
-                        skills_req = []
-                for sk in skills_req:
+                req_raw = row.get("RequiredSkills", "")
+                req_list = []
+            
+                try:
+                    if isinstance(req_raw, str):
+                        req_list = [s.strip() for s in req_raw.split(",")]
+                    elif isinstance(req_raw, list):
+                        req_list = [str(s).strip() for s in req_raw]
+                    else:
+                        req_list = []
+                except Exception:
+                    req_list = []
+            
+                for sk in req_list:
                     required_skills.add(sk)
 
-            # h. CoRunGroups for circular dependency
+
+
+            # h. CoRunGroups for circular dependency (optional, if present)
             if "TaskID" in row and "CoRunGroup" in row:
                 corun_groups[row["TaskID"]] = row["CoRunGroup"] if isinstance(row["CoRunGroup"], list) else []
 
@@ -252,7 +334,25 @@ class FAISSSearcher:
         for phase, dur in phase_durations.items():
             total_slots = 0
             for row in data:
-                if row.get("Phase") == phase:
+                row_phases = []
+                if "Phase" in row:
+                    row_phases = [row["Phase"]]
+                elif "PreferredPhases" in row:
+                    val = row["PreferredPhases"]
+                    if isinstance(val, str):
+                        try:
+                            if val.startswith("["):
+                                row_phases = json.loads(val)
+                            elif "-" in val:
+                                start, end = map(int, val.split("-"))
+                                row_phases = list(range(start, end + 1))
+                            else:
+                                row_phases = [int(val)]
+                        except Exception:
+                            row_phases = []
+                    elif isinstance(val, list):
+                        row_phases = val
+                if phase in row_phases:
                     slots = row.get("AvailableSlots", [])
                     if isinstance(slots, str):
                         try:
@@ -296,11 +396,12 @@ class FAISSSearcher:
 
     def search(self, query: str, top_k=3):
         query_vec = self.model.encode([query])
-        D, I = self.index.search(np.array(query_vec), top_k)
+        D, I = self.index.search(np.array(query_vec).astype('float32'), top_k)
         results = [self.entries[i] for i in I[0]]
         if self.mode == "rows":
             results = [json.loads(r) if isinstance(r, str) else r for r in results]
         return results
+
 
 
 # --------- GPTAgent Wrapper ---------
@@ -423,18 +524,24 @@ def recommend_rules(
     tasks: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     prompt = f"""
-You are an AI analyst.
+You are an AI analyst specialized in scheduling and allocation business rules.
 
-Analyze this data and suggest rules that improve consistency or scheduling:
+Given the data below, analyze and suggest rules specifically in these categories:
+
+- Co-run Rules: Tasks that must execute together
+- Load Limits: Maximum workload per worker group or individual workers
+- Phase Windows: Restrict tasks to specific time phases
+- Slot Restrictions: Minimum common availability requirements for workers
+- Pattern Matching: Advanced regex-based rules to detect recurring patterns
 
 Clients: {json.dumps(clients[:10], indent=2)}
 Workers: {json.dumps(workers[:10], indent=2)}
 Tasks: {json.dumps(tasks[:10], indent=2)}
 
-Return JSON list of suggested rule objects.
+Return a JSON list of suggested rule objects, with rule type and description.
 """
     result_str = gpt_agent.chat_completion(
-        system_prompt="Suggest rules based on data.",
+        system_prompt="Suggest detailed scheduling rules based on data and criteria.",
         user_prompt=prompt
     )
     try:
@@ -442,6 +549,7 @@ Return JSON list of suggested rule objects.
         return rules
     except Exception:
         return []
+
 
 
 # --------- Main DataManager Class ---------

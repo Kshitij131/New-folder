@@ -55,7 +55,6 @@ with st.sidebar:
         st.success(f"Priorities set: {priorities}")
 
 
-
 # --- Main workspace ---
 st.header("3. Data Validation")
 if st.button("Run Validation"):
@@ -99,10 +98,24 @@ if st.button("Add Rule"):
         else:
             st.error("Failed to add rule. Please check the format or try again.")
 
+# New section for AI Recommended Rules
 st.markdown("---")
-st.header("6. Export Data & Rules")
+st.header("6. AI Recommended Rules")
+
+if st.button("Get AI Rule Recommendations"):
+    with st.spinner("Fetching AI recommendations..."):
+        recommended_rules = dm.get_recommended_rules()
+        if recommended_rules:
+            st.success(f"Found {len(recommended_rules)} recommended rules:")
+            for i, rule in enumerate(recommended_rules, 1):
+                st.markdown(f"**Rule {i}:**")
+                st.json(rule)
+        else:
+            st.info("No recommended rules found.")
+
+st.markdown("---")
+st.header("7. Export Data & Rules")
 
 if st.button("Export All to CSV/JSON"):
     outdir = dm.export_all()
     st.success(f"Exported data and rules to folder: {outdir}")
-
